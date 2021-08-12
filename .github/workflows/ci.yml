@@ -8,7 +8,7 @@ env:
 
 jobs:
   rust:
-    name: Test Rust server code
+    name: Rust ${{ matrix.rust }}
     strategy:
       matrix:
         rust:
@@ -47,17 +47,16 @@ jobs:
         if: matrix.rust == 'stable'
         run: cd server && cargo fmt --all -- --check
   js:
-    name: Build, test, lint, and check formatting of Javascript frontend
+    name: Node ${{ matrix.node }}
+    strategy:
+      matrix:
+        node: [ "12", "14", "16" ]
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-node@v2
         with:
-          node-version: "14"
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+          node-version: ${{ matrix.node }}
       - run: cd ui && npm ci
       - run: cd ui && npm run build
       - run: cd ui && npm run test
