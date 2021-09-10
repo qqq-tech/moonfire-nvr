@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use structopt::StructOpt;
 
-mod cameras;
+//mod cameras;
 mod dirs;
 mod users;
 
@@ -43,7 +43,7 @@ pub fn run(args: &Args) -> Result<i32, Error> {
         views::Dialog::around(
             views::SelectView::<fn(&Arc<db::Database>, &mut Cursive)>::new()
                 .on_submit(move |siv, item| item(&db, siv))
-                .item("Cameras and streams".to_string(), cameras::top_dialog)
+                //.item("Cameras and streams".to_string(), cameras::top_dialog)
                 .item("Directories and retention".to_string(), dirs::top_dialog)
                 .item("Users".to_string(), users::top_dialog),
         )

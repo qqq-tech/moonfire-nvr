@@ -14,51 +14,61 @@ use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
 
+struct CameraModel {
+    short_name: String,
+    description: String,
+    onvif_base_url: String,
+    username: String,
+    password: String,
+    streams: [StreamModel; db::NUM_STREAM_TYPES],
+}
+
+struct StreamModel {
+
+}
+
 /// Builds a `CameraChange` from an active `edit_camera_dialog`.
 fn get_change(siv: &mut Cursive) -> Result<db::CameraChange, Error> {
     // Note: these find_name calls are separate statements, which seems to be important:
     // https://github.com/gyscos/Cursive/issues/144
-    let sn = siv
+    let short_name = siv
         .find_name::<views::EditView>("short_name")
         .unwrap()
         .get_content()
         .as_str()
         .into();
-    let d = siv
+    let description = siv
         .find_name::<views::TextArea>("description")
         .unwrap()
         .get_content()
         .into();
-    let h = siv
-        .find_name::<views::EditView>("onvif_host")
+    let onvif_base_url: String = siv
+        .find_name::<views::EditView>("onvif_base_url")
         .unwrap()
         .get_content()
         .as_str()
         .into();
-    let username = match siv
+    let username = siv
         .find_name::<views::EditView>("username")
         .unwrap()
         .get_content()
         .as_str()
-    {
-        "" => None,
-        u => Some(u.to_owned()),
-    };
-    let password = match siv
+        .to_owned();
+    let password = siv
         .find_name::<views::EditView>("password")
         .unwrap()
         .get_content()
         .as_str()
-    {
-        "" => None,
-        p => Some(p.to_owned()),
-    };
+        .to_owned();
     let mut c = db::CameraChange {
-        short_name: sn,
-        description: d,
-        onvif_host: h,
-        username,
-        password,
+        short_name,
+        config: db::json::CameraConfig {
+            description,
+            onvif_base_url: None, // TODO: convert from onvif_host
+            username,
+            password,
+            ..Default::default()
+        },
         streams: Default::default(),
     };
     for &t in &db::ALL_STREAM_TYPES {
@@ -72,7 +82,7 @@ fn get_change(siv: &mut Cursive) -> Result<db::CameraChange, Error> {
             .find_name::<views::Checkbox>(&format!("{}_record", t.as_str()))
             .unwrap()
             .is_checked();
-        let flush_if_sec = i64::from_str(
+        let flush_if_sec = u32::from_str(
             siv.find_name::<views::EditView>(&format!("{}_flush_if_sec", t.as_str()))
                 .unwrap()
                 .get_content()
@@ -85,10 +95,14 @@ fn get_change(siv: &mut Cursive) -> Result<db::CameraChange, Error> {
             .selection()
             .unwrap();
         c.streams[t.index()] = db::StreamChange {
-            rtsp_url,
             sample_file_dir_id,
-            record,
-            flush_if_sec,
+            config: db::json::StreamConfig {
+                mode: (if record { db::json::STREAM_MODE_RECORD } else { "" }).into(),
+                rtsp_url,
+                retain_bytes: 0, // TODO
+                flush_if_sec,
+                ..Default::default()
+            }
         };
     }
     Ok(c)
@@ -116,7 +130,7 @@ fn press_edit(siv: &mut Cursive, db: &Arc<db::Database>, id: Option<i32>) {
     let result = (|| {
         let change = get_change(siv)?;
         for (i, stream) in change.streams.iter().enumerate() {
-            if stream.record && (stream.rtsp_url.is_none() || stream.sample_file_dir_id.is_none()) {
+            if stream.config.mode == db::json::STREAM_MODE_RECORD && (stream.config.rtsp_url.is_none() || stream.sample_file_dir_id.is_none()) {
                 let type_ = db::StreamType::from_index(i).unwrap();
                 bail!(
                     "Can't record {} stream without RTSP URL and sample file directory",
@@ -148,15 +162,16 @@ fn press_edit(siv: &mut Cursive, db: &Arc<db::Database>, id: Option<i32>) {
 
 fn press_test_inner(
     url: Url,
-    username: Option<String>,
-    password: Option<String>,
+    username: String,
+    password: String,
 ) -> Result<String, Error> {
+    let pass_creds = !username.is_empty();
     let (extra_data, _stream) = stream::FFMPEG.open(
         "test stream".to_owned(),
         stream::Source::Rtsp {
             url,
-            username,
-            password,
+            username: if pass_creds { Some(username) } else { None },
+            password: if pass_creds { Some(password) } else { None },
             transport: retina::client::Transport::Tcp,
         },
     )?;
@@ -179,11 +194,11 @@ fn press_test(siv: &mut Cursive, t: db::StreamType) {
         }
     };
     let url = c.streams[t.index()]
-        .rtsp_url
+        .config.rtsp_url
         .take()
         .expect("test button only enabled when URL set");
-    let username = c.username;
-    let password = c.password;
+    let username = c.config.username;
+    let password = c.config.password;
 
     siv.add_layer(
         views::Dialog::text(format!(
@@ -365,7 +380,7 @@ fn edit_camera_dialog(db: &Arc<db::Database>, siv: &mut Cursive, item: &Option<i
         )
         .child("uuid", views::TextView::new("<new>").with_name("uuid"))
         .child("short name", views::EditView::new().with_name("short_name"))
-        .child("onvif_host", views::EditView::new().with_name("onvif_host"))
+        .child("onvif_base_url", views::EditView::new().with_name("onvif_base_url"))
         .child("username", views::EditView::new().with_name("username"))
         .child("password", views::EditView::new().with_name("password"))
         .min_height(6);
@@ -460,24 +475,26 @@ fn edit_camera_dialog(db: &Arc<db::Database>, siv: &mut Cursive, item: &Option<i
                     }
                 }
                 bytes += s.sample_file_bytes;
-                let u = if s.retain_bytes == 0 {
+                let u = if s.config.retain_bytes == 0 {
                     "0 / 0 (0.0%)".to_owned()
                 } else {
                     format!(
                         "{} / {} ({:.1}%)",
                         s.fs_bytes,
-                        s.retain_bytes,
-                        100. * s.fs_bytes as f32 / s.retain_bytes as f32
+                        s.config.retain_bytes,
+                        100. * s.fs_bytes as f32 / s.config.retain_bytes as f32
                     )
                 };
                 dialog.call_on_name(
                     &format!("{}_rtsp_url", t.as_str()),
-                    |v: &mut views::EditView| v.set_content(s.rtsp_url.to_owned()),
+                    |v: &mut views::EditView| if let Some(url) = s.config.rtsp_url.as_ref() {
+                        v.set_content(url.as_str().to_owned());
+                    },
                 );
                 let test_button = dialog
                     .find_name::<views::Button>(&format!("{}_test", t.as_str()))
                     .unwrap();
-                edit_url(&s.rtsp_url, test_button);
+                edit_url(&s.config.rtsp_url, test_button);
                 dialog.call_on_name(
                     &format!("{}_usage_cap", t.as_str()),
                     |v: &mut views::TextView| v.set_content(u),
